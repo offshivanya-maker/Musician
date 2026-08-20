@@ -4,10 +4,6 @@ pytgcalls==3.0.0.dev24
 
 # Core dependencies
 python-dotenv==1.0.0
-asyncio==3.4.3
-
-# FFmpeg wrapper (optional but useful)
-ffmpeg-python==0.2.0
 
 # Utilities
 requests==2.31.0
