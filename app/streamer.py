@@ -2,12 +2,10 @@ import asyncio
 import logging
 from typing import Optional
 from telethon import TelegramClient
-from pytgcalls import PyTgCalls
-from pytgcalls.types import (
-    MediaStream,
-    AudioQuality,
-    VideoQuality
-)
+
+# Correct import for tgcalls
+from tgcalls import PyTgCalls
+from tgcalls.types import AudioQuality
 
 from app.config import Config
 from app.queue_manager import QueueManager
@@ -19,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class Streamer:
-    """Manages the Telegram live stream"""
+    """Manages the Telegram live stream using tgcalls"""
     
     def __init__(
         self,
@@ -34,51 +32,31 @@ class Streamer:
         self.queue_manager = queue_manager
         self.media_manager = media_manager
         self.ffmpeg_manager = ffmpeg_manager
-        self.pytgcalls: Optional[PyTgCalls] = None
+        self.voice_client = None
         self.is_streaming = False
         self._shutdown_event = asyncio.Event()
-        self._current_stream_task: Optional[asyncio.Task] = None
+        self.current_chat_id = None
         
     async def initialize(self) -> None:
-        """Initialize the PyTgCalls streamer"""
+        """Initialize the voice client"""
         try:
-            self.pytgcalls = PyTgCalls(self.client)
-            
-            # Set up event handlers
-            @self.pytgcalls.on_stream_end()
-            async def on_stream_end(chat_id: int):
-                logger.info(f"Stream ended in chat {chat_id}")
-                await self._handle_stream_end()
-            
-            await self.pytgcalls.start()
-            logger.info("PyTgCalls initialized successfully")
-            
+            self.voice_client = PyTgCalls(self.client)
+            await self.voice_client.start()
+            logger.info("Voice client initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize PyTgCalls: {e}")
+            logger.error(f"Failed to initialize voice client: {e}")
             raise
-    
-    async def _handle_stream_end(self):
-        """Handle stream end event"""
-        if not self._shutdown_event.is_set():
-            logger.info("Stream ended, playing next track")
-            await self.play_next()
     
     async def join_chat(self, chat_id: int) -> bool:
         """Join the target chat voice chat"""
         try:
-            if not self.pytgcalls:
+            if not self.voice_client:
                 await self.initialize()
             
-            # Create a silent audio stream to join the chat
-            await self.pytgcalls.join_group_call(
-                chat_id,
-                MediaStream(
-                    "silent.mp3"  # Placeholder
-                )
-            )
+            self.current_chat_id = chat_id
+            await self.voice_client.join_group_call(chat_id)
             logger.info(f"Successfully joined chat {chat_id}")
             return True
-            
         except Exception as e:
             logger.error(f"Failed to join chat: {e}")
             return False
@@ -103,19 +81,11 @@ class Streamer:
             await self.queue_manager.set_current(item)
             await self.queue_manager.set_state(StreamState.PLAYING)
             
-            # Create media stream
-            is_video = item.media_type == MediaType.VIDEO
-            media_stream = MediaStream(
-                media_path,
-                audio_parameters=AudioQuality.HIGH,
-                video_parameters=VideoQuality.HIGH_720p if is_video else None
-            )
-            
-            # Change the stream
-            if self.pytgcalls:
-                await self.pytgcalls.change_stream(
-                    self.config.target_chat_id,
-                    media_stream
+            # Play the media
+            if self.voice_client:
+                await self.voice_client.play(
+                    media_path,
+                    audio_quality=AudioQuality.HIGH
                 )
                 self.is_streaming = True
                 logger.info(f"Now streaming: {item.title}")
@@ -133,10 +103,10 @@ class Streamer:
     
     async def _cleanup_after_play(self, item: QueueItem):
         """Clean up temporary files after playing"""
-        # Wait for the track to finish playing
         await asyncio.sleep(10)
         self.media_manager.cleanup_temp_files()
         await self.queue_manager.set_state(StreamState.IDLE)
+        await self.play_next()
     
     async def play_next(self) -> bool:
         """Play the next track in the queue"""
@@ -158,23 +128,21 @@ class Streamer:
             logger.info(f"Skipping: {current.title}")
             await self.queue_manager.set_current(None)
         
-        # Stop current stream
-        if self.pytgcalls:
+        if self.voice_client:
             try:
-                await self.pytgcalls.pause_stream(self.config.target_chat_id)
+                await self.voice_client.pause()
             except:
                 pass
         
-        # Play next
         return await self.play_next()
     
     async def pause_stream(self) -> bool:
         """Pause the current stream"""
-        if not self.pytgcalls or not self.is_streaming:
+        if not self.voice_client or not self.is_streaming:
             return False
         
         try:
-            await self.pytgcalls.pause_stream(self.config.target_chat_id)
+            await self.voice_client.pause()
             await self.queue_manager.set_state(StreamState.PAUSED)
             logger.info("Stream paused")
             return True
@@ -184,11 +152,11 @@ class Streamer:
     
     async def resume_stream(self) -> bool:
         """Resume the current stream"""
-        if not self.pytgcalls or not self.is_streaming:
+        if not self.voice_client or not self.is_streaming:
             return False
         
         try:
-            await self.pytgcalls.resume_stream(self.config.target_chat_id)
+            await self.voice_client.resume()
             await self.queue_manager.set_state(StreamState.PLAYING)
             logger.info("Stream resumed")
             return True
@@ -199,18 +167,14 @@ class Streamer:
     async def stop_stream(self) -> bool:
         """Stop the current stream"""
         try:
-            if self.pytgcalls:
-                # Leave the call
-                await self.pytgcalls.leave_group_call(self.config.target_chat_id)
+            if self.voice_client and self.current_chat_id:
+                await self.voice_client.leave_group_call(self.current_chat_id)
                 logger.info("Left group call")
             
             self.is_streaming = False
             await self.queue_manager.set_current(None)
             await self.queue_manager.set_state(StreamState.STOPPED)
             logger.info("Stream stopped")
-            
-            # Clean up FFmpeg process
-            await self.ffmpeg_manager.kill_process()
             
             return True
             
@@ -220,10 +184,7 @@ class Streamer:
     
     async def clear_queue(self) -> int:
         """Clear the queue and stop current stream"""
-        # Stop current stream
         await self.stop_stream()
-        
-        # Clear queue
         cleared = await self.queue_manager.clear_queue()
         logger.info(f"Cleared {cleared} items from queue")
         return cleared
@@ -231,22 +192,14 @@ class Streamer:
     async def shutdown(self):
         """Shutdown the streamer"""
         self._shutdown_event.set()
-        
-        if self._current_stream_task:
-            self._current_stream_task.cancel()
-            try:
-                await self._current_stream_task
-            except asyncio.CancelledError:
-                pass
-        
         await self.stop_stream()
         
-        if self.pytgcalls:
+        if self.voice_client:
             try:
-                await self.pytgcalls.leave_all_group_calls()
-                await self.pytgcalls.stop()
-                logger.info("PyTgCalls stopped")
+                await self.voice_client.leave_all_group_calls()
+                await self.voice_client.stop()
+                logger.info("Voice client stopped")
             except Exception as e:
-                logger.error(f"Error stopping PyTgCalls: {e}")
+                logger.error(f"Error stopping voice client: {e}")
         
         self.media_manager.cleanup_temp_files()
