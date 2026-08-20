@@ -2,7 +2,6 @@ import logging
 from typing import Optional
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message
-from telethon.errors import RPCError
 
 from app.config import Config
 from app.queue_manager import QueueManager
@@ -139,7 +138,6 @@ class TelegramBot:
     
     async def _handle_play(self, event):
         """Handle /play command"""
-        # Check if replying to a media message
         if event.is_reply:
             reply_msg = await event.get_reply_message()
             if reply_msg and reply_msg.media:
@@ -151,13 +149,11 @@ class TelegramBot:
     async def _handle_play_reply(self, event, reply_msg: Message):
         """Handle /play command with reply to media"""
         try:
-            # Extract media info
             media_info = await self.media_manager.get_media_info(reply_msg)
             if not media_info:
                 await event.reply("❌ Unsupported media type or no media found.")
                 return
             
-            # Create queue item
             position = await self.queue_manager.get_queue_size() + 1
             item = await self.media_manager.create_queue_item(
                 reply_msg,
@@ -169,13 +165,10 @@ class TelegramBot:
                 await event.reply("❌ Failed to process media.")
                 return
             
-            # Add to queue
             await self.queue_manager.add_item(item)
             
-            # Start streaming if not already playing
             state = await self.queue_manager.get_state()
             if state == StreamState.IDLE or state == StreamState.STOPPED:
-                # Start playing immediately
                 asyncio.create_task(self.streamer.play_next())
                 await event.reply(f"🎵 Playing: {item.title}")
             else:
@@ -188,13 +181,11 @@ class TelegramBot:
     async def _handle_media_message(self, event):
         """Handle media messages (auto-add to queue)"""
         try:
-            # Check if media is supported
             message = event.message
             media_info = await self.media_manager.get_media_info(message)
             if not media_info:
                 return
             
-            # Add to queue
             position = await self.queue_manager.get_queue_size() + 1
             item = await self.media_manager.create_queue_item(
                 message,
@@ -207,7 +198,6 @@ class TelegramBot:
             
             await self.queue_manager.add_item(item)
             
-            # Start streaming if not already playing
             state = await self.queue_manager.get_state()
             if state == StreamState.IDLE or state == StreamState.STOPPED:
                 asyncio.create_task(self.streamer.play_next())
