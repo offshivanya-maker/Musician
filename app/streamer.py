@@ -6,9 +6,7 @@ from pytgcalls import PyTgCalls
 from pytgcalls.types import (
     MediaStream, 
     AudioQuality, 
-    VideoQuality,
-    StreamVideoQuality,
-    StreamAudioQuality
+    VideoQuality
 )
 from pytgcalls.types.stream import StreamAudioEnded
 
@@ -17,7 +15,6 @@ from app.queue_manager import QueueManager
 from app.telegram_media import TelegramMediaManager
 from app.ffmpeg import FFmpegManager
 from app.models import QueueItem, StreamState, MediaType
-from app.utils import get_media_path
 
 logger = logging.getLogger(__name__)
 
@@ -67,26 +64,15 @@ class Streamer:
             if not self.pytgcalls:
                 await self.initialize()
             
-            # Check if already in the chat
-            try:
-                calls = await self.pytgcalls.get_running_calls()
-                for call in calls:
-                    if call.chat_id == chat_id:
-                        logger.info(f"Already in chat {chat_id}")
-                        return True
-            except:
-                pass
-            
             # Join the chat
             logger.info(f"Joining chat {chat_id}")
             await self.pytgcalls.join_group_call(
                 chat_id,
                 MediaStream(
                     "empty.mp3",  # Placeholder, will be replaced
-                    audio_quality=AudioQuality.HIGH,
-                    video_quality=VideoQuality.HIGH
-                ),
-                stream_duration=300
+                    audio_parameters=AudioQuality.HIGH,
+                    video_parameters=VideoQuality.HIGH_720p
+                )
             )
             logger.info(f"Successfully joined chat {chat_id}")
             return True
@@ -109,7 +95,7 @@ class Streamer:
             # Download media to temporary file
             message = await self.client.get_messages(item.chat_id, ids=item.message_id)
             if not message:
-                logger.error(f"Message {item.message_id} not found")
+                logger.error(f"Message {message.id} not found")
                 return False
             
             media_path = await self.media_manager.download_temp_media(message)
@@ -121,19 +107,12 @@ class Streamer:
             await self.queue_manager.set_current(item)
             await self.queue_manager.set_state(StreamState.PLAYING)
             
-            # Get FFmpeg command
-            is_video = item.media_type == MediaType.VIDEO
-            ffmpeg_cmd = await self.ffmpeg_manager.get_stream_command(
-                media_path,
-                is_video=is_video
-            )
-            
             # Create media stream
+            is_video = item.media_type == MediaType.VIDEO
             media_stream = MediaStream(
                 media_path,
-                audio_parameters=StreamAudioQuality.HIGH,
-                video_parameters=StreamVideoQuality.HIGH_720p if is_video else None,
-                ffmpeg_parameters=ffmpeg_cmd
+                audio_parameters=AudioQuality.HIGH,
+                video_parameters=VideoQuality.HIGH_720p if is_video else None
             )
             
             # Change the stream
