@@ -114,13 +114,6 @@ class TelegramBot:
             if command in self.commands:
                 await self._execute_command(command, event)
                 return
-            
-            # Handle file message with /play reply
-            if command == "/play" and event.is_reply:
-                reply_msg = await event.get_reply_message()
-                if reply_msg and reply_msg.media:
-                    await self._handle_play_reply(event, reply_msg)
-                    return
         
         # Handle media messages (auto-add to queue)
         elif message.media:
@@ -152,13 +145,6 @@ class TelegramBot:
             if reply_msg and reply_msg.media:
                 await self._handle_play_reply(event, reply_msg)
                 return
-        
-        # Check if command has arguments (file name)
-        args = event.text.split()[1:] if len(event.text.split()) > 1 else []
-        if args:
-            # Search for media by name (not implemented)
-            await event.reply("❌ Please reply to a media message with /play")
-            return
         
         await event.reply("❌ Please reply to a media message with /play")
     
