@@ -1,9 +1,10 @@
 # Telegram libraries
-telethon==1.28.5
-pytgcalls==2.0.0
+telethon==1.34.0
+pytgcalls==3.0.0.dev24
 
 # Core dependencies
 python-dotenv==1.0.0
+aiofiles==23.2.1
 
 # Utilities
 requests==2.31.0
