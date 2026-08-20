@@ -4,5 +4,5 @@ aiofiles==23.2.1
 pycryptodome==3.20.0
 requests==2.31.0
 
-# Use the original tgcalls library directly (more stable)
-git+https://github.com/MarshalX/tgcalls.git
+# Voice chat ke liye stable package
+pytgcalls==3.0.0.dev24
