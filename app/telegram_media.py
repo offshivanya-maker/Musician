@@ -1,13 +1,9 @@
 import logging
 import tempfile
-from typing import Optional, Tuple
-from telethon import TelegramClient
-from telethon.tl.types import (
-    MessageMediaDocument, MessageMediaPhoto, Document,
-    TypeMessageMedia, TypeDocument
-)
-from telethon.tl.custom import Message
 import os
+from typing import Optional
+from telethon import TelegramClient
+from telethon.tl.custom import Message
 
 from app.models import QueueItem, MediaType
 
@@ -34,71 +30,29 @@ class TelegramMediaManager:
             "duration": None,
         }
         
-        # Check media type
         if message.audio:
             media_info["media_type"] = MediaType.AUDIO
-            media_info["file_name"] = message.audio.attributes[0].title or f"audio_{message.id}"
+            media_info["file_name"] = f"audio_{message.id}.mp3"
             if hasattr(message.audio, "duration"):
                 media_info["duration"] = message.audio.duration
         elif message.video:
             media_info["media_type"] = MediaType.VIDEO
-            media_info["file_name"] = message.video.attributes[0].title or f"video_{message.id}"
+            media_info["file_name"] = f"video_{message.id}.mp4"
             if hasattr(message.video, "duration"):
                 media_info["duration"] = message.video.duration
-        elif message.document:
-            media_info["media_type"] = MediaType.AUDIO  # Assume audio file
-            media_info["file_name"] = message.document.attributes[0].title or f"file_{message.id}"
         elif message.voice:
             media_info["media_type"] = MediaType.AUDIO
-            media_info["file_name"] = f"voice_{message.id}"
+            media_info["file_name"] = f"voice_{message.id}.ogg"
             if hasattr(message.voice, "duration"):
                 media_info["duration"] = message.voice.duration
-        elif message.video_note:
-            media_info["media_type"] = MediaType.VIDEO
-            media_info["file_name"] = f"video_note_{message.id}"
+        elif message.document:
+            media_info["media_type"] = MediaType.AUDIO
+            media_info["file_name"] = f"file_{message.id}.mp3"
         else:
-            # Try to detect from document
-            if message.media:
-                if isinstance(message.media, MessageMediaDocument):
-                    doc = message.media.document
-                    if doc:
-                        # Check mime type
-                        mime_type = getattr(doc, "mime_type", "")
-                        if mime_type and mime_type.startswith("audio/"):
-                            media_info["media_type"] = MediaType.AUDIO
-                        elif mime_type and mime_type.startswith("video/"):
-                            media_info["media_type"] = MediaType.VIDEO
-                        # Get file name
-                        for attr in doc.attributes:
-                            if hasattr(attr, "title"):
-                                media_info["file_name"] = attr.title
-                                break
-                    else:
-                        return None
-        
-        # Default file name if not set
-        if not media_info["file_name"]:
-            media_info["file_name"] = f"{media_info['media_type'].value}_{message.id}"
-        
-        # Ensure file name has extension
-        if not self._has_extension(media_info["file_name"]):
-            ext = self._get_extension_for_type(media_info["media_type"])
-            media_info["file_name"] += ext
+            return None
         
         logger.info(f"Media info extracted: {media_info}")
         return media_info
-    
-    def _has_extension(self, filename: str) -> bool:
-        """Check if filename has an extension"""
-        return "." in filename
-    
-    def _get_extension_for_type(self, media_type: MediaType) -> str:
-        """Get default extension for media type"""
-        if media_type == MediaType.AUDIO:
-            return ".mp3"
-        elif media_type == MediaType.VIDEO:
-            return ".mp4"
-        return ".bin"
     
     async def download_temp_media(self, message: Message) -> Optional[str]:
         """Download media to a temporary file"""
@@ -106,17 +60,14 @@ class TelegramMediaManager:
             if not message.media:
                 return None
             
-            # Create temp file
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
             temp_path = temp_file.name
             temp_file.close()
             
-            # Download media
             logger.info(f"Downloading media from message {message.id}")
             await self.client.download_media(
                 message.media,
-                file=temp_path,
-                progress_callback=self._download_progress_callback
+                file=temp_path
             )
             
             self.temp_files.append(temp_path)
@@ -126,13 +77,6 @@ class TelegramMediaManager:
         except Exception as e:
             logger.error(f"Failed to download media: {e}")
             return None
-    
-    def _download_progress_callback(self, current: int, total: int):
-        """Callback for download progress"""
-        if total > 0:
-            progress = (current / total) * 100
-            if progress % 10 < 0.1:  # Log every 10%
-                logger.debug(f"Download progress: {progress:.1f}%")
     
     def cleanup_temp_files(self):
         """Clean up temporary files"""
@@ -161,7 +105,7 @@ class TelegramMediaManager:
             chat_id=media_info["chat_id"],
             media_type=media_info["media_type"],
             file_name=media_info["file_name"],
-            title=media_info.get("title"),
+            title=media_info.get("title") or media_info["file_name"],
             duration=media_info.get("duration"),
             position=position,
             added_by=added_by,
