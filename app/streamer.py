@@ -2,16 +2,12 @@ import asyncio
 import logging
 from typing import Optional
 from telethon import TelegramClient
-
-# Try different imports based on version
-try:
-    from pytgcalls import GroupCallFactory
-    from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
-    USE_FACTORY = True
-except ImportError:
-    from pytgcalls import PyTgCalls
-    from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
-    USE_FACTORY = False
+from pytgcalls import PyTgCalls
+from pytgcalls.types import (
+    MediaStream,
+    AudioQuality,
+    VideoQuality
+)
 
 from app.config import Config
 from app.queue_manager import QueueManager
@@ -38,56 +34,48 @@ class Streamer:
         self.queue_manager = queue_manager
         self.media_manager = media_manager
         self.ffmpeg_manager = ffmpeg_manager
-        self.group_call = None
+        self.pytgcalls: Optional[PyTgCalls] = None
         self.is_streaming = False
         self._shutdown_event = asyncio.Event()
         self._current_stream_task: Optional[asyncio.Task] = None
-        self._use_factory = USE_FACTORY
         
     async def initialize(self) -> None:
         """Initialize the PyTgCalls streamer"""
         try:
-            if self._use_factory:
-                # Version 3.x
-                self.group_call = GroupCallFactory(
-                    self.client,
-                    GroupCallFactory.MTProto()
-                ).get_file_group_call()
-                self.group_call.add_handler(self._on_stream_end, "stream_end")
-            else:
-                # Version 2.x
-                self.group_call = PyTgCalls(self.client)
-                await self.group_call.start()
-                self.group_call.add_handler(self._on_stream_end, "stream_end")
+            self.pytgcalls = PyTgCalls(self.client)
             
+            # Set up event handlers
+            @self.pytgcalls.on_stream_end()
+            async def on_stream_end(chat_id: int):
+                logger.info(f"Stream ended in chat {chat_id}")
+                await self._handle_stream_end()
+            
+            await self.pytgcalls.start()
             logger.info("PyTgCalls initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize PyTgCalls: {e}")
             raise
     
-    async def _on_stream_end(self, event):
+    async def _handle_stream_end(self):
         """Handle stream end event"""
-        logger.info(f"Stream ended")
         if not self._shutdown_event.is_set():
+            logger.info("Stream ended, playing next track")
             await self.play_next()
     
     async def join_chat(self, chat_id: int) -> bool:
         """Join the target chat voice chat"""
         try:
-            if not self.group_call:
+            if not self.pytgcalls:
                 await self.initialize()
             
-            if self._use_factory:
-                await self.group_call.start(chat_id)
-            else:
-                await self.group_call.join_group_call(
-                    chat_id,
-                    MediaStream(
-                        "empty.mp3",
-                        audio_parameters=AudioQuality.HIGH
-                    )
+            # Create a silent audio stream to join the chat
+            await self.pytgcalls.join_group_call(
+                chat_id,
+                MediaStream(
+                    "silent.mp3"  # Placeholder
                 )
+            )
             logger.info(f"Successfully joined chat {chat_id}")
             return True
             
@@ -117,29 +105,26 @@ class Streamer:
             
             # Create media stream
             is_video = item.media_type == MediaType.VIDEO
+            media_stream = MediaStream(
+                media_path,
+                audio_parameters=AudioQuality.HIGH,
+                video_parameters=VideoQuality.HIGH_720p if is_video else None
+            )
             
-            if self._use_factory:
-                await self.group_call.play(
-                    media_path,
-                    audio_quality=AudioQuality.HIGH,
-                    video_quality=VideoQuality.HIGH_720p if is_video else None
-                )
-            else:
-                await self.group_call.change_stream(
+            # Change the stream
+            if self.pytgcalls:
+                await self.pytgcalls.change_stream(
                     self.config.target_chat_id,
-                    MediaStream(
-                        media_path,
-                        audio_parameters=AudioQuality.HIGH,
-                        video_parameters=VideoQuality.HIGH_720p if is_video else None
-                    )
+                    media_stream
                 )
+                self.is_streaming = True
+                logger.info(f"Now streaming: {item.title}")
+                
+                # Clean up temp file after playing
+                asyncio.create_task(self._cleanup_after_play(item))
+                return True
             
-            self.is_streaming = True
-            logger.info(f"Now streaming: {item.title}")
-            
-            # Clean up temp file after playing
-            asyncio.create_task(self._cleanup_after_play(item))
-            return True
+            return False
             
         except Exception as e:
             logger.error(f"Error playing track: {e}")
@@ -148,6 +133,7 @@ class Streamer:
     
     async def _cleanup_after_play(self, item: QueueItem):
         """Clean up temporary files after playing"""
+        # Wait for the track to finish playing
         await asyncio.sleep(10)
         self.media_manager.cleanup_temp_files()
         await self.queue_manager.set_state(StreamState.IDLE)
@@ -172,27 +158,23 @@ class Streamer:
             logger.info(f"Skipping: {current.title}")
             await self.queue_manager.set_current(None)
         
-        if self.group_call:
+        # Stop current stream
+        if self.pytgcalls:
             try:
-                if self._use_factory:
-                    await self.group_call.pause()
-                else:
-                    await self.group_call.pause_stream(self.config.target_chat_id)
+                await self.pytgcalls.pause_stream(self.config.target_chat_id)
             except:
                 pass
         
+        # Play next
         return await self.play_next()
     
     async def pause_stream(self) -> bool:
         """Pause the current stream"""
-        if not self.group_call or not self.is_streaming:
+        if not self.pytgcalls or not self.is_streaming:
             return False
         
         try:
-            if self._use_factory:
-                await self.group_call.pause()
-            else:
-                await self.group_call.pause_stream(self.config.target_chat_id)
+            await self.pytgcalls.pause_stream(self.config.target_chat_id)
             await self.queue_manager.set_state(StreamState.PAUSED)
             logger.info("Stream paused")
             return True
@@ -202,14 +184,11 @@ class Streamer:
     
     async def resume_stream(self) -> bool:
         """Resume the current stream"""
-        if not self.group_call or not self.is_streaming:
+        if not self.pytgcalls or not self.is_streaming:
             return False
         
         try:
-            if self._use_factory:
-                await self.group_call.resume()
-            else:
-                await self.group_call.resume_stream(self.config.target_chat_id)
+            await self.pytgcalls.resume_stream(self.config.target_chat_id)
             await self.queue_manager.set_state(StreamState.PLAYING)
             logger.info("Stream resumed")
             return True
@@ -220,18 +199,19 @@ class Streamer:
     async def stop_stream(self) -> bool:
         """Stop the current stream"""
         try:
-            if self.group_call:
-                if self._use_factory:
-                    await self.group_call.stop()
-                else:
-                    await self.group_call.leave_group_call(self.config.target_chat_id)
-                logger.info("Stream stopped")
+            if self.pytgcalls:
+                # Leave the call
+                await self.pytgcalls.leave_group_call(self.config.target_chat_id)
+                logger.info("Left group call")
             
             self.is_streaming = False
             await self.queue_manager.set_current(None)
             await self.queue_manager.set_state(StreamState.STOPPED)
+            logger.info("Stream stopped")
             
+            # Clean up FFmpeg process
             await self.ffmpeg_manager.kill_process()
+            
             return True
             
         except Exception as e:
@@ -240,7 +220,10 @@ class Streamer:
     
     async def clear_queue(self) -> int:
         """Clear the queue and stop current stream"""
+        # Stop current stream
         await self.stop_stream()
+        
+        # Clear queue
         cleared = await self.queue_manager.clear_queue()
         logger.info(f"Cleared {cleared} items from queue")
         return cleared
@@ -258,15 +241,12 @@ class Streamer:
         
         await self.stop_stream()
         
-        if self.group_call:
+        if self.pytgcalls:
             try:
-                if self._use_factory:
-                    await self.group_call.stop()
-                else:
-                    await self.group_call.leave_all_group_calls()
-                    await self.group_call.stop()
-                logger.info("Group call stopped")
+                await self.pytgcalls.leave_all_group_calls()
+                await self.pytgcalls.stop()
+                logger.info("PyTgCalls stopped")
             except Exception as e:
-                logger.error(f"Error stopping group call: {e}")
+                logger.error(f"Error stopping PyTgCalls: {e}")
         
         self.media_manager.cleanup_temp_files()
